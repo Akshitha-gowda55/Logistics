@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: logistics
+      POSTGRES_PASSWORD: logistics
+      POSTGRES_DB: logistics
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+volumes:
+  pgdata:
