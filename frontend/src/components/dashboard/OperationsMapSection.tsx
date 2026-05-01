@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAuth } from "../context/AuthContext";
-import { api, type IndiaCityWire, RouteRecommendationRequest, RouteRecommendationResponse, Workflow, type LiveTrackingResponse } from "../lib/api";
-import type { IndiaCityRef } from "../lib/indiaCitiesLookup";
-import { LogisticsMapPanel } from "../components/logistics-map/LogisticsMapPanel";
-import { RouteSearchForm } from "../components/logistics-map/RouteSearchForm";
-import { RouteRecommendationCard } from "../components/logistics-map/RouteRecommendationCard";
-import { AlternateRoutesPanel } from "../components/logistics-map/AlternateRoutesPanel";
-import { LiveTrackingWidget } from "../components/logistics-map/LiveTrackingWidget";
-import { buildSupplierPois, buildWarehousePois, geocode, type Poi } from "../components/logistics-map/demoPoi";
+import { useAuth } from "../../context/AuthContext";
+import { api, type IndiaCityWire, RouteRecommendationRequest, RouteRecommendationResponse, Workflow, type LiveTrackingResponse } from "../../lib/api";
+import type { IndiaCityRef } from "../../lib/indiaCitiesLookup";
+import { LogisticsMapPanel } from "../logistics-map/LogisticsMapPanel";
+import { RouteSearchForm } from "../logistics-map/RouteSearchForm";
+import { RouteRecommendationCard } from "../logistics-map/RouteRecommendationCard";
+import { AlternateRoutesPanel } from "../logistics-map/AlternateRoutesPanel";
+import { LiveTrackingWidget } from "../logistics-map/LiveTrackingWidget";
+import { buildSupplierPois, buildWarehousePois, geocode, type Poi } from "../logistics-map/demoPoi";
 
-export function MapPage() {
+/** Leaflet logistics map embedded on the Operations Control Tower dashboard. */
+export function OperationsMapSection() {
   const { token } = useAuth();
   const [firstShipment, setFirstShipment] = useState<string>("");
   const [firstWorkflow, setFirstWorkflow] = useState<string>("");
@@ -66,7 +67,7 @@ export function MapPage() {
         const wf = ((pending as Workflow[])[0] ?? (all as Workflow[])[0]) as Workflow | undefined;
         if (!wf) return;
         setFirstShipment(wf.shipment_id);
-        setFirstWorkflow(wf.workflow_id);
+        setFirstWorkflow(wf.item_name);
         setRequest((prev) => ({
           ...prev,
           source_location: wf.source_location || prev.source_location,
@@ -74,7 +75,7 @@ export function MapPage() {
           priority: wf.priority || prev.priority,
           delivery_deadline: wf.due_date ? new Date(wf.due_date).toISOString() : prev.delivery_deadline,
         }));
-        const shipment = await api.workflowShipmentDetails(token, wf.workflow_id);
+        const shipment = await api.workflowShipmentDetails(token, wf.item_name);
         if (shipment?.selected_route?.route_code) {
           setSelectedRouteCode(shipment.selected_route.route_code);
         }
@@ -108,7 +109,7 @@ export function MapPage() {
 
   async function selectRoute(routeCode: string) {
     if (!token || !firstWorkflow) {
-      setError("Open this page with an assigned workflow to save a route to that shipment.");
+      setError("You need at least one workflow assignment to attach a saved route.");
       return;
     }
     setWorking(true);
@@ -125,7 +126,7 @@ export function MapPage() {
 
   async function reroute() {
     if (!token || !firstWorkflow) {
-      setError("Assign a workflow to use reroute (uses that shipment's lane).");
+      setError("Assign a workflow to use reroute (uses that shipment lane).");
       return;
     }
     setWorking(true);
@@ -151,7 +152,6 @@ export function MapPage() {
       ...buildSupplierPois(),
     ];
 
-    // Disruption markers (demo) based on selected route risk.
     const selected =
       routes?.best_route?.route_code === selectedRouteCode
         ? routes?.best_route
@@ -167,7 +167,7 @@ export function MapPage() {
           lat: mid.lat,
           lng: mid.lng,
           severity: selected.disruption_probability >= 0.45 ? "high" : "medium",
-          detail: `Problem chance ${Math.round(selected.disruption_probability * 100)}% · try new route`,
+          detail: `Problem chance ${Math.round(selected.disruption_probability * 100)}%`,
         });
       }
     }
@@ -175,7 +175,7 @@ export function MapPage() {
   }, [request.source_location, request.destination_location, routes, selectedRouteCode, tracking, cityRefList]);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-[420px,1fr]">
+    <div className="grid gap-4 lg:grid-cols-[minmax(280px,420px),1fr]">
       <div className="space-y-4">
         <RouteSearchForm
           value={request}
@@ -204,9 +204,7 @@ export function MapPage() {
                   {working ? "Working…" : "Find New Route"}
                 </button>
               ) : null}
-              <span className="text-xs text-slate-400 self-center">
-                Best route is highlighted. Click others to compare.
-              </span>
+              <span className="text-xs text-slate-400 self-center">Leaflet routes: pick best vs eco/alternate lanes.</span>
             </div>
 
             <RouteRecommendationCard
@@ -223,24 +221,12 @@ export function MapPage() {
           </>
         ) : (
           <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-xs text-slate-400">
-            Click <span className="font-semibold text-slate-200">Find Best Route</span> to plot India routes on the map.
+            Choose cities and tap <span className="font-semibold text-slate-200">Find Best Route</span>.
           </div>
         )}
 
-        {!bootLoading && (!firstWorkflow || !firstShipment) ? (
-          <div className="rounded-xl border border-dashed border-slate-700 bg-slate-950/40 p-3 text-[0.7rem] text-slate-500">
-            Tip: assign a workflow to save a selected route to a shipment and use reroute + live tracking for that shipment.
-          </div>
-        ) : null}
-
         {firstShipment ? (
-          <LiveTrackingWidget
-            shipmentId={firstShipment}
-            syncKey={selectedRouteCode}
-            onTracking={(t) => {
-              setTracking(t);
-            }}
-          />
+          <LiveTrackingWidget shipmentId={firstShipment} syncKey={selectedRouteCode} onTracking={(t) => setTracking(t)} />
         ) : null}
       </div>
 
@@ -248,12 +234,11 @@ export function MapPage() {
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <p className="text-sm font-semibold text-slate-100">Map</p>
-              <p className="mt-1 text-xs text-slate-400">Zoom, move, see routes, and track shipment live.</p>
+              <p className="text-sm font-semibold text-slate-100">Route map</p>
+              <p className="mt-1 text-xs text-slate-400">Source / destination pins and corridor polyline (React Leaflet).</p>
             </div>
             <div className="text-xs text-slate-400">
-              Workflow <span className="font-mono text-slate-200">{firstWorkflow || "—"}</span> · Shipment{" "}
-              <span className="font-mono text-slate-200">{firstShipment || "—"}</span>
+              <span className="font-mono text-slate-200">{firstWorkflow || "—"}</span> · {firstShipment || "—"}
             </div>
           </div>
         </div>

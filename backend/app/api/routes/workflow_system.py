@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 UTC = timezone.utc
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -19,13 +19,21 @@ from app.schemas.workflow_system import (
     AuditLog,
     AuditTrailItem,
     AddRemarkRequest,
+    ChecklistPatchRequest,
+    ChecklistPatchResponse,
     CreateWorkflowRequest,
+    DecisionInsight,
+    InventoryDomainPatch,
     MarkCompleteRequest,
     Notification,
+    RouteDomainPatch,
+    StageStatusRequest,
+    SupplierDomainPatch,
     User,
     UserRole,
     WorkflowItem,
     WorkflowShipmentDetails,
+    WorkflowStageUpdate,
     WorkflowUpdateRequest,
     RouteRecommendationRequest,
     RouteRecommendationResponse,
@@ -35,15 +43,36 @@ from app.schemas.workflow_system import (
     WorkflowTaskItem,
     WorkflowTasksResponse,
     WorkflowTaskUpdateRequest,
+    workflow_item_from_model,
 )
 from app.services.workflow_engine import engine
+from app.services.scenario_simulation_service import simulate_scenario
 from app.services.forecast_service import build_demo_forecast
 from app.services.inventory_intelligence import build_inventory_insights
 from app.services.supplier_risk_service import build_supplier_risk
-from app.services.scenario_simulation_service import simulate_scenario
+from app.services.decision_engine import evaluate_for_workflow, evaluate_global_snapshot
 from app.services.route_recommendation_engine import recommend_routes, select_route_for_workflow
 
 router = APIRouter()
+
+
+def _timeline_pub(wf_label: str, stages: list) -> list[WorkflowStageUpdate]:
+    return [
+        WorkflowStageUpdate(
+            id=s.id,
+            item_name=wf_label,
+            stage_name=s.stage_name,
+            role=s.role,
+            updated_by_user_id=s.updated_by_user_id,
+            previous_status=s.previous_status,
+            new_status=s.new_status,
+            remark=s.remark,
+            started_at=s.started_at,
+            completed_at=s.completed_at,
+            created_at=s.created_at,
+        )
+        for s in stages
+    ]
 
 
 def _latlng_along_path(path: list, progress_pct: float) -> tuple[float, float]:
@@ -119,25 +148,50 @@ def india_cities_list(user=Depends(get_current_user)) -> list[dict]:
 
 
 @router.get("/workflows", response_model=list[WorkflowItem])
-def workflows(user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[WorkflowItem]:
-    return engine.workflows_for_role(db, user.role)
+def workflows(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+) -> list[WorkflowItem]:
+    items = engine.workflows_for_role(db, user.role)
+    needle = (q or "").strip().lower()
+    if needle:
+
+        def _matches_row(w):
+            pn = (getattr(w, "product_name", None) or "").lower()
+            rn = (getattr(w, "route_name", None) or "").lower()
+            return (
+                needle in (w.item_name or "").lower()
+                or needle in pn
+                or needle in rn
+                or needle in w.source_location.lower()
+                or needle in w.destination_location.lower()
+            )
+
+        items = [w for w in items if _matches_row(w)]
+
+    engine.reconcile_workflows_list(db, items)
+
+    return [workflow_item_from_model(w) for w in items]
 
 
 @router.get("/workflows/pending", response_model=list[WorkflowItem])
 def pending_tasks(user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[WorkflowItem]:
-    return engine.pending_for_user(db, user)
+    pend = engine.pending_for_user(db, user)
+    engine.reconcile_workflows_list(db, pend)
+    return [workflow_item_from_model(w) for w in pend]
 
 
 def _can_view_workflow(user: User, wf) -> None:
-    if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
-        require_role(user.role, [UserRole.executive])
+    """Coordinated control tower: any signed-in team may load shared checklist/view state."""
+    del user, wf
 
 
-@router.get("/workflows/{workflow_id}/tasks", response_model=WorkflowTasksResponse)
-def get_workflow_tasks(workflow_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowTasksResponse:
-    wf = engine.get_workflow(db, workflow_id)
+@router.get("/workflows/{item_name}/tasks", response_model=WorkflowTasksResponse)
+def get_workflow_tasks(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowTasksResponse:
+    wf = engine.get_workflow(db, item_name)
     _can_view_workflow(user, wf)
-    wf, tasks = engine.list_workflow_tasks_for_user(db, workflow_id, user)
+    wf, tasks = engine.list_workflow_tasks_for_user(db, item_name, user)
     name_by_id: dict[int, str] = {}
     ids = {t.completed_by_user_id for t in tasks if t.completed_by_user_id}
     if ids:
@@ -145,9 +199,10 @@ def get_workflow_tasks(workflow_id: str, user=Depends(get_current_user), db: Ses
             name_by_id[u.id] = u.name
     out: list[WorkflowTaskItem] = []
     for t in tasks:
-        can_edit = t.stage == wf.current_stage and user.role == wf.current_role
+        can_edit = engine.user_can_edit_task(wf, t, user)
         out.append(
             WorkflowTaskItem(
+                id=t.id,
                 task_key=t.task_key,
                 stage=t.stage,
                 task_name=t.task_name,
@@ -160,28 +215,31 @@ def get_workflow_tasks(workflow_id: str, user=Depends(get_current_user), db: Ses
             )
         )
     return WorkflowTasksResponse(
-        workflow_id=wf.workflow_id,
+        item_name=wf.item_name,
+        workflow_id=wf.id,
         current_stage=wf.current_stage,
         current_role=wf.current_role,
+        sync_version=int(getattr(wf, "sync_version", 0) or 0),
         tasks=out,
     )
 
 
-@router.patch("/workflows/{workflow_id}/tasks/{task_key}", response_model=WorkflowTaskItem)
+@router.patch("/workflows/{item_name}/tasks/{task_key}", response_model=WorkflowTaskItem)
 def update_workflow_task(
-    workflow_id: str,
+    item_name: str,
     task_key: str,
     payload: WorkflowTaskUpdateRequest,
     user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> WorkflowTaskItem:
-    task = engine.set_workflow_task_completed(db, workflow_id, task_key, user, payload.completed)
-    wf = engine.get_workflow(db, workflow_id)
+    task = engine.set_workflow_task_completed(db, item_name, task_key, user, payload.completed, remarks=payload.remarks or None)
+    wf = engine.get_workflow(db, item_name)
     name = None
     if task.completed_by_user_id:
         u = db.scalar(select(UserModel).where(UserModel.id == task.completed_by_user_id))
         name = u.name if u else None
     return WorkflowTaskItem(
+        id=task.id,
         task_key=task.task_key,
         stage=task.stage,
         task_name=task.task_name,
@@ -190,66 +248,168 @@ def update_workflow_task(
         completed_at=task.completed_at,
         completed_by_user_id=task.completed_by_user_id,
         completed_by_name=name,
-        can_edit=task.stage == wf.current_stage and user.role == wf.current_role,
+        can_edit=engine.user_can_edit_task(wf, task, user),
     )
 
 
-@router.get("/workflows/{workflow_id}", response_model=WorkflowItem)
-def workflow_by_id(workflow_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowItem:
-    wf = engine.get_workflow(db, workflow_id)
-    if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
-        require_role(user.role, [UserRole.executive])
-    return wf
+@router.patch("/workflows/{workflow_ref}/stage-status", response_model=WorkflowItem)
+def patch_workflow_stage_status(
+    workflow_ref: str,
+    payload: StageStatusRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkflowItem:
+    wf0 = engine.get_workflow(db, workflow_ref)
+    _can_view_workflow(user, wf0)
+    engine.set_lane_stage_status(db, workflow_ref, payload.stage, user, completed=payload.completed, remarks=payload.remarks)
+    wf = engine.sync_workflow_holder_with_stage(db, workflow_ref)
+    return workflow_item_from_model(wf)
 
 
-@router.get("/workflows/{workflow_id}/timeline")
-def workflow_timeline(workflow_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    wf = engine.get_workflow(db, workflow_id)
-    if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot view this workflow timeline.")
-    return engine.get_timeline(db, workflow_id)
+@router.get("/workflows/{item_name}", response_model=WorkflowItem)
+def workflow_by_identifier(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowItem:
+    wf = engine.sync_workflow_holder_with_stage(db, item_name)
+    _can_view_workflow(user, wf)
+    return workflow_item_from_model(wf)
 
 
-@router.post("/workflows/{workflow_id}/remark")
+@router.get("/decision", response_model=DecisionInsight)
+def decision_aggregate(
+    item_name: str | None = Query(default=None),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> DecisionInsight:
+    """Control Tower: synthesized guidance from workflows + forecasts + signals."""
+    if item_name:
+        wf = engine.get_workflow(db, item_name)
+        _can_view_workflow(user, wf)
+        return evaluate_for_workflow(db, wf)
+    return evaluate_global_snapshot(db)
+
+
+@router.patch("/workflows/{item_name}/control/supplier", response_model=WorkflowItem)
+def patch_supplier_control(
+    item_name: str,
+    payload: SupplierDomainPatch,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkflowItem:
+    wf = engine.patch_supplier_domain(db, item_name, user, payload)
+    return workflow_item_from_model(wf)
+
+
+@router.patch("/workflows/{item_name}/control/route", response_model=WorkflowItem)
+def patch_route_control(
+    item_name: str,
+    payload: RouteDomainPatch,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkflowItem:
+    wf = engine.patch_route_domain(db, item_name, user, payload)
+    return workflow_item_from_model(wf)
+
+
+@router.patch("/workflows/{item_name}/control/inventory", response_model=WorkflowItem)
+def patch_inventory_control(
+    item_name: str,
+    payload: InventoryDomainPatch,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> WorkflowItem:
+    wf = engine.patch_inventory_domain(db, item_name, user, payload)
+    return workflow_item_from_model(wf)
+
+
+@router.get("/workflows/{item_name}/timeline", response_model=list[WorkflowStageUpdate])
+def workflow_timeline_legacy(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[WorkflowStageUpdate]:
+    wf = engine.get_workflow(db, item_name)
+    _can_view_workflow(user, wf)
+    stages = engine.get_timeline(db, wf)
+    return _timeline_pub(wf.item_name, stages)
+
+
+@router.get("/workflows/{item_name}/control-timeline")
+def workflow_timeline_control_tower(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    wf = engine.get_workflow(db, item_name)
+    _can_view_workflow(user, wf)
+    return engine.get_unified_timeline(db, wf)
+
+
+@router.post("/workflows/{item_name}/remark")
 def add_workflow_remark(
-    workflow_id: str, payload: AddRemarkRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
+    item_name: str, payload: AddRemarkRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
 ):
-    return engine.add_remark(db, workflow_id, user, payload.remark)
+    return engine.add_remark(db, item_name, user, payload.remark)
 
 
-@router.get("/workflows/{workflow_id}/shipment", response_model=WorkflowShipmentDetails)
-def workflow_shipment_details(workflow_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowShipmentDetails:
-    wf = engine.get_workflow(db, workflow_id)
-    if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot view this workflow shipment details.")
-    return engine.shipment_details_for_workflow(db, workflow_id)
+@router.get("/workflows/{item_name}/shipment", response_model=WorkflowShipmentDetails)
+def workflow_shipment_details(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowShipmentDetails:
+    wf = engine.get_workflow(db, item_name)
+    _can_view_workflow(user, wf)
+    return engine.shipment_details_for_workflow(db, item_name)
 
 
-@router.get("/workflows/{workflow_id}/audit", response_model=list[AuditLog])
-def workflow_audit_preview(workflow_id: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[AuditLog]:
-    wf = engine.get_workflow(db, workflow_id)
+@router.get("/workflows/{item_name}/audit", response_model=list[AuditLog])
+def workflow_audit_preview(item_name: str, user=Depends(get_current_user), db: Session = Depends(get_db)) -> list[AuditLog]:
+    wf = engine.get_workflow(db, item_name)
     if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot view this workflow audit trail.")
-    return engine.audit_logs_for_workflow(db, workflow_id, limit=20)
+    rows = engine.audit_logs_for_workflow(db, item_name, limit=20)
+    return [
+        AuditLog(
+            id=log.id,
+            user_id=log.user_id,
+            item_name=wf.item_name,
+            action_type=log.action_type,
+            module_name=log.module_name,
+            details=log.details,
+            created_at=log.created_at,
+        )
+        for log in rows
+    ]
 
 
+@router.post("/workflows", response_model=WorkflowItem)
 @router.post("/workflow/create", response_model=WorkflowItem)
 def workflow_create(payload: CreateWorkflowRequest, user=Depends(get_current_user), db: Session = Depends(get_db)) -> WorkflowItem:
-    return engine.create_workflow(db, user, payload)
+    wf = engine.create_workflow(db, user, payload)
+    return workflow_item_from_model(wf)
 
 
-@router.patch("/workflows/{workflow_id}/status", response_model=WorkflowItem)
+@router.patch("/workflows/{workflow_ref}/checklist", response_model=ChecklistPatchResponse)
+def patch_workflow_checklist(
+    workflow_ref: str,
+    payload: ChecklistPatchRequest,
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ChecklistPatchResponse:
+    out = engine.patch_team_checklist(
+        db,
+        workflow_ref,
+        user,
+        role_token=payload.role,
+        field=payload.field,
+        completed=payload.completed,
+        remarks=payload.remarks,
+        expected_sync_version=payload.expected_sync_version,
+    )
+    return ChecklistPatchResponse(**out)
+
+
+@router.patch("/workflows/{item_name}/status", response_model=WorkflowItem)
 def update_workflow_status(
-    workflow_id: str, payload: WorkflowUpdateRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
+    item_name: str, payload: WorkflowUpdateRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
 ) -> WorkflowItem:
-    return engine.update_status(db, workflow_id, user, payload)
+    wf = engine.update_status(db, item_name, user, payload)
+    return workflow_item_from_model(wf)
 
 
-@router.post("/workflows/{workflow_id}/complete", response_model=WorkflowItem)
+@router.post("/workflows/{item_name}/complete", response_model=WorkflowItem)
 def mark_stage_complete(
-    workflow_id: str, payload: MarkCompleteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
+    item_name: str, payload: MarkCompleteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
 ) -> WorkflowItem:
-    return engine.mark_complete(db, workflow_id, user, payload)
+    wf = engine.mark_complete(db, item_name, user, payload)
+    return workflow_item_from_model(wf)
 
 
 @router.get("/notifications", response_model=list[Notification])
@@ -275,7 +435,7 @@ def mark_all_notifications_read(user=Depends(get_current_user), db: Session = De
 @router.get("/audit-trail", response_model=list[AuditTrailItem])
 def audit_trail(
     role: UserRole | None = None,
-    workflow_id: str | None = None,
+    item_name: str | None = None,
     start: str | None = None,
     end: str | None = None,
     action_type: str | None = None,
@@ -289,7 +449,7 @@ def audit_trail(
     return engine.audit_trail_query(
         db=db,
         role=role,
-        workflow_public_id=workflow_id,
+        workflow_public_id=item_name,
         start_iso=start,
         end_iso=end,
         action_type=action_type,
@@ -392,16 +552,18 @@ def route_recommendations(payload: dict, user=Depends(require_roles([UserRole.ex
     )
 
 
-@router.post("/workflows/{workflow_id}/routes/select", response_model=SelectRouteResponse)
-def select_route(workflow_id: str, payload: SelectRouteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)) -> SelectRouteResponse:
-    wf = engine.get_workflow(db, workflow_id)
+@router.post("/workflows/{item_name}/routes/select", response_model=SelectRouteResponse)
+def select_route(item_name: str, payload: SelectRouteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)) -> SelectRouteResponse:
+    if user.role == UserRole.executive:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Executive is view-only; operations selects routes.")
+    wf = engine.get_workflow(db, item_name)
     if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot select a route for this workflow.")
-    res = select_route_for_workflow(db, workflow_id, payload.route_code)
+    res = select_route_for_workflow(db, item_name, payload.route_code)
     engine.log_audit_event(
         db,
         user=user,
-        workflow_id=workflow_id,
+        workflow_ref=item_name,
         action_type="ROUTE_SELECTED",
         module_name="route_recommendation",
         payload={"selected_route_code": payload.route_code},
@@ -410,17 +572,19 @@ def select_route(workflow_id: str, payload: SelectRouteRequest, user=Depends(get
     return res
 
 
-@router.post("/workflows/{workflow_id}/routes/reroute", response_model=RouteRecommendationResponse)
+@router.post("/workflows/{item_name}/routes/reroute", response_model=RouteRecommendationResponse)
 def reroute_recommendation(
-    workflow_id: str, payload: RerouteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
+    item_name: str, payload: RerouteRequest, user=Depends(get_current_user), db: Session = Depends(get_db)
 ) -> RouteRecommendationResponse:
-    wf = engine.get_workflow(db, workflow_id)
+    if user.role == UserRole.executive:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Executive is view-only; operations requests reroutes.")
+    wf = engine.get_workflow(db, item_name)
     if user.role != UserRole.executive and wf.current_role != user.role and wf.assigned_role != user.role:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Role cannot request reroute for this workflow.")
     engine.log_audit_event(
         db,
         user=user,
-        workflow_id=workflow_id,
+        workflow_ref=item_name,
         action_type="REROUTE_RECOMMENDED",
         module_name="route_recommendation",
         payload={"disruption_event": payload.disruption_event, "force": payload.force},
@@ -477,3 +641,35 @@ def live_tracking(shipment_id: str, user=Depends(get_current_user), db: Session 
         "current_position": {"lat": lat, "lng": lng},
         "checkpoints": _checkpoints_for_shipment(demo_path, o.display_name, d.display_name),
     }
+
+
+# --- Clean URL aliases (same handlers; easier for integrations) ---
+@router.get("/kpi/{role}/summary")
+def kpi_summary_alias(role: UserRole, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return dashboard_summary_by_role(role, user, db)
+
+
+@router.get("/workflow", response_model=list[WorkflowItem])
+def workflow_list_alias(
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+    q: str | None = Query(default=None),
+) -> list[WorkflowItem]:
+    items = engine.workflows_for_role(db, user.role)
+    needle = (q or "").strip().lower()
+    if needle:
+
+        def _matches_row(w):
+            pn = (getattr(w, "product_name", None) or "").lower()
+            rn = (getattr(w, "route_name", None) or "").lower()
+            return (
+                needle in (w.item_name or "").lower()
+                or needle in pn
+                or needle in rn
+                or needle in w.source_location.lower()
+                or needle in w.destination_location.lower()
+            )
+
+        items = [w for w in items if _matches_row(w)]
+
+    return [workflow_item_from_model(w) for w in items]

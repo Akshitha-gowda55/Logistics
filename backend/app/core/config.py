@@ -13,6 +13,18 @@ class Settings(BaseSettings):
     mapbox_access_token: str | None = None
     # Default off: India demo uses static lightweight polylines for fast API + predictable ₹ metrics
     use_mapbox_directions: bool = False
+    # Preferred: OpenRouteService (driving-car) or GraphHopper for real road geometry
+    openrouteservice_api_key: str | None = None
+    graphhopper_api_key: str | None = None
+    graphhopper_base_url: str = "https://graphhopper.com/api/1"
+    # Twilio SMS (optional)
+    twilio_account_sid: str | None = None
+    twilio_auth_token: str | None = None
+    twilio_from_number: str | None = None
+    sms_phone_operations: str | None = None
+    sms_phone_inventory: str | None = None
+    sms_phone_supplier: str | None = None
+    sms_phone_executive: str | None = None
     auth_secret_key: str = "change-this-in-production"
     auth_algorithm: str = "HS256"
     auth_access_token_expire_minutes: int = 120

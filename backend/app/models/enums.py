@@ -9,11 +9,19 @@ class UserRole(str, Enum):
 
 
 class WorkflowStage(str, Enum):
+    """Include legacy short names and expanded SmartFlow stage strings stored in older SQLite DBs."""
+
     planning = "planning"
     operations = "operations"
     inventory = "inventory"
     supplier_risk = "supplier_risk"
     closed = "closed"
+    executive_planning = "executive_planning"
+    operations_dispatch = "operations_dispatch"
+    supplier_risk_check = "supplier_risk_check"
+    inventory_allocation = "inventory_allocation"
+    delivery_completion = "delivery_completion"
+    executive_review = "executive_review"
 
 
 class WorkflowStatus(str, Enum):

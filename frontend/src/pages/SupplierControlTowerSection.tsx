@@ -14,6 +14,8 @@ import { SupplierRiskTrendChart } from "../components/dashboard/supplier-risk/Su
 import { SupplierIncidentHistoryPanel } from "../components/dashboard/supplier-risk/SupplierIncidentHistoryPanel";
 import { formatScenarioLogisticsCostInr } from "../lib/formatCurrency";
 import { WorkflowStageChecklist } from "../components/workflow/WorkflowStageChecklist";
+import { SupplierDomainControlCard } from "../components/dashboard/DomainControls";
+import { ShipmentProgressTasksPanel } from "../components/dashboard/ShipmentProgressTasksPanel";
 import { useWorkflowSyncRefresh } from "../hooks/useWorkflowSync";
 
 const supplierRiskStage = "supplier_risk";
@@ -57,7 +59,7 @@ type SupplierRiskInsightsResponse = {
   incidents?: Array<{ id: string; supplier: string; severity: string; time: string; headline: string; detail: string }>;
 };
 
-export function SupplierRiskDashboardPage() {
+export function SupplierControlTowerSection() {
   const { token } = useAuth();
 
   const [loading, setLoading] = useState(true);
@@ -74,23 +76,26 @@ export function SupplierRiskDashboardPage() {
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
   const [supplierChecklistDone, setSupplierChecklistDone] = useState(false);
+  const [collabWorkflows, setCollabWorkflows] = useState<Workflow[]>([]);
 
   const refreshAll = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     setError("");
     try {
-      const [pending, risk, sc, notifs] = await Promise.all([
+      const [pending, risk, sc, notifs, wfAll] = await Promise.all([
         api.pendingTasks(token),
         api.supplierRisk(token),
         api.scenario(token, "supplier_delay"),
         api.notifications(token),
+        api.workflows(token),
       ]);
 
       const supplierTasks = (pending as Workflow[]).filter((w) => w.current_stage === supplierRiskStage);
       setTasks(supplierTasks);
+      setCollabWorkflows(wfAll as Workflow[]);
       setSelected((prev) => {
-        if (prev && supplierTasks.some((x) => x.workflow_id === prev.workflow_id)) return prev;
+        if (prev && supplierTasks.some((x) => x.item_name === prev.item_name)) return prev;
         return supplierTasks[0] ?? null;
       });
       setRiskInsights(risk as SupplierRiskInsightsResponse);
@@ -118,11 +123,11 @@ export function SupplierRiskDashboardPage() {
 
   useEffect(() => {
     if (!token || !selected) return;
-    void loadTimeline(selected.workflow_id);
+    void loadTimeline(selected.item_name);
     setRemark("");
     setSupplierChecklistDone(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, selected?.workflow_id]);
+  }, [token, selected?.item_name]);
 
   const supplierList = riskInsights?.suppliers ?? [];
   const topSupplier = supplierList[0];
@@ -132,7 +137,7 @@ export function SupplierRiskDashboardPage() {
   const openEscalations = useMemo(() => {
     if (!selected) return [];
     return notifications
-      .filter((n) => n.related_workflow_id === selected.workflow_id && !n.is_read)
+      .filter((n) => n.related_item_name === selected.item_name && !n.is_read)
       .filter((n) => n.type === "warning" || n.type === "critical" || n.type === "info")
       .slice(0, 5);
   }, [notifications, selected]);
@@ -193,7 +198,7 @@ export function SupplierRiskDashboardPage() {
     try {
       if (action === "caseClosed") {
         const closeRemark = buildRemark("Case closed (final mitigation completed)");
-        await api.completeWorkflowStage(token, selected.workflow_id, closeRemark);
+        await api.completeWorkflowStage(token, selected.item_name, closeRemark);
         await refreshAll();
         return;
       }
@@ -202,8 +207,8 @@ export function SupplierRiskDashboardPage() {
       if (!update) return;
 
       const updateRemark = buildRemark(update.actionLabel);
-      await api.updateWorkflowStatus(token, selected.workflow_id, update.status, updateRemark);
-      await loadTimeline(selected.workflow_id);
+      await api.updateWorkflowStatus(token, selected.item_name, update.status, updateRemark);
+      await loadTimeline(selected.item_name);
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Supplier risk action failed");
@@ -215,30 +220,35 @@ export function SupplierRiskDashboardPage() {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-slate-300">
-        Loading supplier risk page…
+        Loading…
       </div>
     );
   }
 
   return (
     <div className="space-y-5">
+      <ShipmentProgressTasksPanel
+        workflows={collabWorkflows}
+        currentRole="supplier_risk"
+      />
+
       <div className="grid gap-4 lg:grid-cols-3">
         <section className="lg:col-span-1 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Supplier Cases</h2>
-          <p className="mt-1 text-xs text-slate-400">These cases are for your team.</p>
+          <h2 className="text-lg font-semibold text-white">Supplier cases</h2>
+          <p className="mt-1 text-xs text-slate-400">Tap a case. Tick work status when this step belongs to Supplier.</p>
 
           <div className="mt-3 space-y-3">
             {tasks.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-700 bg-slate-950/40 p-4 text-center">
                 <p className="text-sm font-medium text-slate-100">No supplier cases</p>
-                <p className="mt-1 text-xs text-slate-500">Cases will show when inventory team asks for supplier help.</p>
+                <p className="mt-1 text-xs text-slate-500">Cases arrive when Warehouse raises supplier risk.</p>
               </div>
             ) : (
               tasks.map((w) => (
                 <SupplierCaseCard
-                  key={w.workflow_id}
+                  key={w.item_name}
                   workflow={w}
-                  active={selected?.workflow_id === w.workflow_id}
+                  active={selected?.item_name === w.item_name}
                   onSelect={() => setSelected(w)}
                   riskBadge={
                     (() => {
@@ -256,15 +266,15 @@ export function SupplierRiskDashboardPage() {
         <section className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           {!selected ? (
             <div className="rounded-lg border border-dashed border-slate-700 bg-slate-950/40 p-6 text-center text-slate-300">
-              Select a case to see details and take action.
+              Select a case on the left to act.
             </div>
           ) : (
             <>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold text-white">Supplier Work</h2>
+                  <h2 className="text-lg font-semibold text-white">This case — work status</h2>
                   <p className="mt-1 text-xs text-slate-400">
-                    {selected.workflow_id} · {selected.shipment_id} · {selected.title}
+                    {selected.item_name} · {selected.shipment_id} · {selected.title}
                   </p>
                 </div>
                 <div className="min-w-[240px]">
@@ -274,12 +284,22 @@ export function SupplierRiskDashboardPage() {
 
               <div className="mt-4">
                 <WorkflowStageChecklist
-                  workflowId={selected.workflow_id}
+                  itemName={selected.item_name}
                   compact
                   onWorkflowUpdated={() => void refreshAll()}
                   onAllCurrentStageTasksDone={setSupplierChecklistDone}
-                  showMarkComplete={false}
                   remark={remark}
+                />
+              </div>
+
+              <div className="mt-4">
+                <SupplierDomainControlCard
+                  token={token}
+                  workflow={selected}
+                  onSaved={(wf) => {
+                    setSelected(wf);
+                    void refreshAll();
+                  }}
                 />
               </div>
 

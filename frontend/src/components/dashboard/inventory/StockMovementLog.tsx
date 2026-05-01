@@ -10,10 +10,10 @@ type TimelineRow = {
 
 export function StockMovementLog({
   timeline,
-  selectedWorkflowId,
+  selectedItemName,
 }: {
   timeline: TimelineRow[];
-  selectedWorkflowId: string;
+  selectedItemName: string;
 }) {
   const items = (timeline ?? []).slice().reverse().slice(0, 12);
 
@@ -23,7 +23,7 @@ export function StockMovementLog({
         Stock Move Log
       </p>
       <p className="mt-1 text-[0.7rem] text-slate-500">
-        Using step history for {selectedWorkflowId}.
+        Using step history for {selectedItemName}.
       </p>
 
       {items.length === 0 ? (

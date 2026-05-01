@@ -23,7 +23,7 @@ export function InventoryTaskCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="truncate text-xs font-semibold text-white">
-            {workflow.workflow_id} · {workflow.shipment_id}
+            {workflow.item_name} · {workflow.shipment_id}
           </p>
           <p className="mt-1 line-clamp-2 text-[0.7rem] text-slate-300">{workflow.title}</p>
         </div>

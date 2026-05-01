@@ -12,6 +12,8 @@ import { WarehouseStockCards } from "../components/dashboard/inventory/Warehouse
 import { InventoryStockTable } from "../components/dashboard/inventory/InventoryStockTable";
 import { RebalanceRecommendationPanel } from "../components/dashboard/inventory/RebalanceRecommendationPanel";
 import { WorkflowStageChecklist } from "../components/workflow/WorkflowStageChecklist";
+import { InventoryDomainControlCard } from "../components/dashboard/DomainControls";
+import { ShipmentProgressTasksPanel } from "../components/dashboard/ShipmentProgressTasksPanel";
 import { useWorkflowSyncRefresh } from "../hooks/useWorkflowSync";
 
 const inventoryStage = "inventory";
@@ -58,7 +60,7 @@ type InventoryInsightsResponse = {
   } | null;
 };
 
-export function InventoryDashboardPage() {
+export function InventoryControlTowerSection() {
   const { token } = useAuth();
   const [loading, setLoading] = useState(true);
   const [tasks, setTasks] = useState<Workflow[]>([]);
@@ -67,6 +69,7 @@ export function InventoryDashboardPage() {
   const [forecast, setForecast] = useState<ForecastResponse | null>(null);
   const [timeline, setTimeline] = useState<any[]>([]);
   const [remark, setRemark] = useState("");
+  const [collabWorkflows, setCollabWorkflows] = useState<Workflow[]>([]);
   const [actionKind, setActionKind] = useState<InventoryActionKind>("received");
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
@@ -77,11 +80,17 @@ export function InventoryDashboardPage() {
     setLoading(true);
     setError("");
     try {
-      const [pending, inv, fc] = await Promise.all([api.pendingTasks(token), api.inventoryInsights(token), api.forecast(token)]);
+      const [pending, inv, fc, wfAll] = await Promise.all([
+        api.pendingTasks(token),
+        api.inventoryInsights(token),
+        api.forecast(token),
+        api.workflows(token),
+      ]);
       const invTasks = (pending as Workflow[]).filter((w) => w.current_stage === inventoryStage);
       setTasks(invTasks);
+      setCollabWorkflows(wfAll as Workflow[]);
       setSelected((prev) => {
-        if (prev && invTasks.some((x) => x.workflow_id === prev.workflow_id)) return prev;
+        if (prev && invTasks.some((x) => x.item_name === prev.item_name)) return prev;
         return invTasks[0] ?? null;
       });
       setInventoryInsights(inv as InventoryInsightsResponse);
@@ -108,12 +117,12 @@ export function InventoryDashboardPage() {
 
   useEffect(() => {
     if (!token || !selected) return;
-    void loadTimeline(selected.workflow_id);
+    void loadTimeline(selected.item_name);
     setRemark("");
     setActionKind("received");
     setInvChecklistDone(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, selected?.workflow_id]);
+  }, [token, selected?.item_name]);
 
   const stockSummary = useMemo(() => {
     const warehouses = inventoryInsights?.warehouses ?? [];
@@ -139,8 +148,8 @@ export function InventoryDashboardPage() {
         ? `${remark.trim()}${remarkSuffix ? ` · ${remarkSuffix}` : ""}`
         : remarkSuffix || "Inventory action completed.";
 
-      await api.updateWorkflowStatus(token, selected.workflow_id, status, combinedRemark);
-      await loadTimeline(selected.workflow_id);
+      await api.updateWorkflowStatus(token, selected.item_name, status, combinedRemark);
+      await loadTimeline(selected.item_name);
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Inventory action failed");
@@ -154,7 +163,7 @@ export function InventoryDashboardPage() {
     setWorking(true);
     setError("");
     try {
-      await api.completeWorkflowStage(token, selected.workflow_id, remark || "Warehouse processing completed. Forwarding to Supplier/Risk.");
+      await api.completeWorkflowStage(token, selected.item_name, remark || "Warehouse processing completed. Forwarding to Supplier/Risk.");
       await refreshAll();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to complete inventory stage");
@@ -166,26 +175,31 @@ export function InventoryDashboardPage() {
   if (loading) {
     return (
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 text-slate-300">
-        Loading inventory page…
+        Loading…
       </div>
     );
   }
 
   return (
     <div className="space-y-5">
+      <ShipmentProgressTasksPanel
+        workflows={collabWorkflows}
+        currentRole="inventory"
+      />
+
       <div className="grid gap-4 lg:grid-cols-3">
         <section className="lg:col-span-1 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <h2 className="text-lg font-semibold text-white">Warehouse Tasks</h2>
-          <p className="mt-1 text-xs text-slate-400">These tasks are for your team.</p>
+          <h2 className="text-lg font-semibold text-white">Your warehouse jobs</h2>
+          <p className="mt-1 text-xs text-slate-400">Tap a job on the left. Tick work status below when it is warehouse turn.</p>
           <div className="mt-3 space-y-3">
             {tasks.length === 0 ? (
               <div className="rounded-lg border border-dashed border-slate-700 bg-slate-950/40 p-4 text-center">
                 <p className="text-sm font-medium text-slate-100">No inventory tasks</p>
-                <p className="mt-1 text-xs text-slate-500">Tasks will show here after operations is done.</p>
+                <p className="mt-1 text-xs text-slate-500">Jobs arrive here after Operations finishes their step.</p>
               </div>
             ) : (
               tasks.map((w) => (
-                <InventoryTaskCard key={w.workflow_id} workflow={w} active={selected?.workflow_id === w.workflow_id} onSelect={() => setSelected(w)} />
+                <InventoryTaskCard key={w.item_name} workflow={w} active={selected?.item_name === w.item_name} onSelect={() => setSelected(w)} />
               ))
             )}
           </div>
@@ -194,15 +208,15 @@ export function InventoryDashboardPage() {
         <section className="lg:col-span-2 rounded-xl border border-slate-800 bg-slate-900/60 p-4">
           {!selected ? (
             <div className="rounded-lg border border-dashed border-slate-700 bg-slate-950/40 p-6 text-center text-slate-300">
-              Select a task to see details and take action.
+              Select a job on the left to see checks and charts.
             </div>
           ) : (
             <>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <h2 className="text-lg font-semibold text-white">Inventory Work</h2>
+                  <h2 className="text-lg font-semibold text-white">This job — work status</h2>
                   <p className="mt-1 text-xs text-slate-400">
-                    {selected.workflow_id} · {selected.shipment_id} · {selected.title}
+                    {selected.item_name} · {selected.shipment_id} · {selected.title}
                   </p>
                 </div>
                 <div className="min-w-[220px]">
@@ -212,12 +226,22 @@ export function InventoryDashboardPage() {
 
               <div className="mt-4">
                 <WorkflowStageChecklist
-                  workflowId={selected.workflow_id}
+                  itemName={selected.item_name}
                   compact
                   onWorkflowUpdated={() => void refreshAll()}
                   onAllCurrentStageTasksDone={setInvChecklistDone}
-                  showMarkComplete={false}
                   remark={remark}
+                />
+              </div>
+
+              <div className="mt-4">
+                <InventoryDomainControlCard
+                  token={token}
+                  workflow={selected}
+                  onSaved={(wf) => {
+                    setSelected(wf);
+                    void refreshAll();
+                  }}
                 />
               </div>
 
@@ -245,7 +269,7 @@ export function InventoryDashboardPage() {
                     </div>
                   </div>
 
-                  <StockMovementLog timeline={timeline} selectedWorkflowId={selected.workflow_id} />
+                  <StockMovementLog timeline={timeline} selectedItemName={selected.item_name} />
                 </div>
               </div>
 

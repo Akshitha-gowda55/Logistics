@@ -2,9 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
+
+
+if TYPE_CHECKING:
+    from app.models.entities import WorkflowModel as WorkflowModelORM
 
 
 class UserRole(str, Enum):
@@ -27,6 +31,12 @@ class WorkflowStage(str, Enum):
     inventory = "inventory"
     supplier_risk = "supplier_risk"
     closed = "closed"
+    executive_planning = "executive_planning"
+    operations_dispatch = "operations_dispatch"
+    supplier_risk_check = "supplier_risk_check"
+    inventory_allocation = "inventory_allocation"
+    delivery_completion = "delivery_completion"
+    executive_review = "executive_review"
 
 
 class WorkflowStatus(str, Enum):
@@ -83,9 +93,26 @@ class TokenPayload(BaseModel):
     exp: int
 
 
+class TimelineEntry(BaseModel):
+    time: str
+    role: str
+    action: str
+    remarks: str = ""
+    sync_status: str = "synced"
+
+
+class DecisionInsight(BaseModel):
+    problem: str
+    impact: str
+    recommended_action: str
+    priority: Literal["low", "medium", "high"]
+
+
 class WorkflowItem(BaseModel):
     id: int
-    workflow_id: str
+    item_name: str
+    product_name: str | None = None
+    route_name: str | None = None
     shipment_id: str
     title: str
     description: str
@@ -103,13 +130,121 @@ class WorkflowItem(BaseModel):
     final_outcome: str | None = None
     created_at: datetime
     updated_at: datetime
+    supplier_status: str = "scheduled"
+    route_status: str = "not_dispatched"
+    inventory_status: str = "ok"
+    executive_completed: bool = False
+    supplier_completed: bool = False
+    operations_completed: bool = False
+    inventory_completed: bool = False
+    material_type: str = ""
+    quantity: float | None = None
+    unit: str = ""
+    supplier_party_name: str = ""
+    supplier_party_location: str = ""
+    sync_version: int = 0
+    timeline: list[TimelineEntry] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 
 
+class SupplierDomainPatch(BaseModel):
+    supplier_status: str = Field(..., description="e.g. shipped, delayed, unavailable")
+    delay_reason: str = ""
+
+
+class RouteDomainPatch(BaseModel):
+    route_status: str = Field(..., description="e.g. dispatched, in_transit, delayed, delivered")
+    remark: str = ""
+
+
+class InventoryDomainPatch(BaseModel):
+    inventory_status: str = Field(..., description="e.g. ok, low_stock, reorder_sent, critical")
+    reorder_requested: bool = False
+    remark: str = ""
+
+
+def _normalize_priority_for_api(raw: object) -> Literal["Low", "Medium", "High", "Critical"]:
+    s = str(raw or "Medium").strip()
+    mapped = {"low": "Low", "medium": "Medium", "high": "High", "critical": "Critical"}.get(s.lower())
+    if mapped:
+        return mapped  # type: ignore[return-value]
+    if s in ("Low", "Medium", "High", "Critical"):
+        return s  # type: ignore[return-value]
+    return "Medium"
+
+
+def workflow_item_from_model(wf: "WorkflowModelORM") -> WorkflowItem:
+    """Maps ORM WorkflowModel.timeline_events JSON to API `timeline`."""
+    raw = getattr(wf, "timeline_events", None)
+    parsed: list[dict] = []
+    if isinstance(raw, list):
+        parsed = [x for x in raw if isinstance(x, dict)]
+    elif isinstance(raw, str):
+        import json
+
+        try:
+            v = json.loads(raw)
+            if isinstance(v, list):
+                parsed = [x for x in v if isinstance(x, dict)]
+        except json.JSONDecodeError:
+            parsed = []
+    entries: list[TimelineEntry] = []
+    for x in parsed:
+        try:
+            xc = dict(x)
+            t = xc.get("time")
+            if isinstance(t, datetime):
+                xc["time"] = t.isoformat()
+            elif t is not None and not isinstance(t, str):
+                xc["time"] = str(t)
+            if "sync_status" not in xc:
+                xc["sync_status"] = "synced"
+            entries.append(TimelineEntry.model_validate(xc))
+        except Exception:
+            continue
+    return WorkflowItem(
+        id=wf.id,
+        item_name=(wf.item_name or "").strip() or wf.title,
+        product_name=getattr(wf, "product_name", None),
+        route_name=getattr(wf, "route_name", None),
+        shipment_id=wf.shipment_id,
+        title=wf.title,
+        description=wf.description,
+        priority=_normalize_priority_for_api(wf.priority),
+        source_location=wf.source_location,
+        destination_location=wf.destination_location,
+        current_stage=wf.current_stage,
+        current_role=wf.current_role,
+        assigned_user_id=wf.assigned_user_id,
+        assigned_role=wf.assigned_role,
+        status=wf.status,
+        progress_percent=wf.progress_percent,
+        due_date=wf.due_date,
+        remarks=wf.remarks,
+        final_outcome=wf.final_outcome,
+        created_at=wf.created_at,
+        updated_at=wf.updated_at,
+        supplier_status=getattr(wf, "supplier_status", None) or "scheduled",
+        route_status=getattr(wf, "route_status", None) or "not_dispatched",
+        inventory_status=getattr(wf, "inventory_status", None) or "ok",
+        executive_completed=bool(getattr(wf, "executive_completed", False)),
+        supplier_completed=bool(getattr(wf, "supplier_completed", False)),
+        operations_completed=bool(getattr(wf, "operations_completed", False)),
+        inventory_completed=bool(getattr(wf, "inventory_completed", False)),
+        material_type=getattr(wf, "material_type", None) or "",
+        quantity=float(wf.quantity) if getattr(wf, "quantity", None) is not None else None,
+        unit=getattr(wf, "unit", None) or "",
+        supplier_party_name=getattr(wf, "supplier_party_name", None) or "",
+        supplier_party_location=getattr(wf, "supplier_party_location", None) or "",
+        sync_version=int(getattr(wf, "sync_version", 0) or 0),
+        timeline=entries,
+    )
+
+
 class WorkflowStageUpdate(BaseModel):
     id: int
-    workflow_id: str
+    item_name: str
     stage_name: WorkflowStage
     role: UserRole
     updated_by_user_id: int
@@ -119,8 +254,6 @@ class WorkflowStageUpdate(BaseModel):
     started_at: datetime
     completed_at: datetime | None = None
     created_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 class AddRemarkRequest(BaseModel):
@@ -145,22 +278,21 @@ class WorkflowShipmentDetails(BaseModel):
 
 
 class Notification(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     id: int
     user_id: int | None = None
     target_role: UserRole | None = None
     message: str
     type: AlertType = AlertType.info
-    related_workflow_id: str
+    related_item_name: str = Field(validation_alias="related_workflow_id")
     is_read: bool = False
     created_at: datetime
-
-    model_config = {"from_attributes": True}
 
 
 class AuditLog(BaseModel):
     id: int
     user_id: int
-    workflow_id: str | None = None
+    item_name: str | None = None
     action_type: str
     module_name: str
     details: str
@@ -174,7 +306,7 @@ class AuditTrailItem(BaseModel):
     user_id: int
     user_name: str | None = None
     user_role: UserRole | None = None
-    workflow_id: str | None = None
+    item_name: str | None = None
     previous_status: str | None = None
     new_status: str | None = None
     action_type: str
@@ -194,6 +326,7 @@ class MarkCompleteRequest(BaseModel):
 
 
 class WorkflowTaskItem(BaseModel):
+    id: int
     task_key: str
     stage: WorkflowStage
     task_name: str
@@ -206,27 +339,65 @@ class WorkflowTaskItem(BaseModel):
 
 
 class WorkflowTasksResponse(BaseModel):
-    workflow_id: str
+    item_name: str
+    workflow_id: int = Field(description="Internal DB id — use for stable React keys with task id")
     current_stage: WorkflowStage
     current_role: UserRole
+    sync_version: int = 0
     tasks: list[WorkflowTaskItem]
 
 
 class WorkflowTaskUpdateRequest(BaseModel):
     completed: bool
+    remarks: str = ""
+
+
+class StageStatusRequest(BaseModel):
+    """Update the active lane checkbox for one shipment (maps to the primary task for that stage)."""
+    stage: str = Field(..., min_length=1, max_length=64, description="planning, supplier, supplier_risk, operations, or inventory")
+    completed: bool
+    remarks: str = ""
 
 
 class CreateWorkflowRequest(BaseModel):
-    workflow_id: str
-    shipment_id: str
-    title: str
+    item_name: str = Field(..., min_length=1, max_length=255)
+    product_name: str = ""
+    route_name: str = ""
+    shipment_id: str = ""
+    title: str = ""
     description: str = ""
-    priority: Literal["Low", "Medium", "High", "Critical"] = "Medium"
+    material_type: str = ""
+    quantity: float | None = None
+    unit: str = ""
+    supplier_name: str = ""
+    supplier_location: str = ""
+    priority: str = "Medium"
     source_location: str
     destination_location: str
     due_date: datetime | None = None
+    required_date: datetime | None = None
     assigned_operations_user_id: int | None = None
     remark: str = ""
+    remarks: str = ""
+
+
+class ChecklistPatchRequest(BaseModel):
+    role: str = Field(..., min_length=1, max_length=32)
+    field: str = Field(..., min_length=1, max_length=80)
+    completed: bool
+    remarks: str = ""
+    expected_sync_version: int | None = None
+
+
+class ChecklistPatchResponse(BaseModel):
+    success: bool
+    workflow_id: str
+    item_name: str
+    updated_role: str
+    field: str
+    completed: bool
+    next_team: str
+    sync_version: int
 
 
 class WorkflowSummary(BaseModel):
@@ -275,6 +446,7 @@ class RouteRecommendationItem(BaseModel):
     score: float
     explanation: str
     path_coordinates: list[dict] = []
+    route_lane: str | None = Field(None, description="balanced | fast | eco when road API attached")
 
 
 class RouteRecommendationResponse(BaseModel):
@@ -288,7 +460,7 @@ class SelectRouteRequest(BaseModel):
 
 
 class SelectRouteResponse(BaseModel):
-    workflow_id: str
+    item_name: str
     shipment_id: str
     selected_route_code: str
 

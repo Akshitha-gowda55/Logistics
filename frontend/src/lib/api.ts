@@ -57,14 +57,43 @@ async function request<T>(path: string, method: RequestMethod, token?: string, b
 
 export type UserRole = "executive" | "operations" | "inventory" | "supplier_risk";
 export type WorkflowStatus = "Pending" | "Assigned" | "In Progress" | "Waiting for Next Team" | "Delayed" | "Escalated" | "Completed" | "Closed";
-export type WorkflowStage = "planning" | "operations" | "inventory" | "supplier_risk" | "closed";
+export type WorkflowStage =
+  | "planning"
+  | "operations"
+  | "inventory"
+  | "supplier_risk"
+  | "closed"
+  | "executive_planning"
+  | "operations_dispatch"
+  | "supplier_risk_check"
+  | "inventory_allocation"
+  | "delivery_completion"
+  | "executive_review";
 
 export type AuthUser = { id: number; name: string; email: string; role: UserRole };
 export type LoginResponse = { access_token: string; token_type: "bearer"; user: AuthUser };
 
+export type TimelineEntryWire = {
+  time: string;
+  role: string;
+  action: string;
+  remarks: string;
+  source?: string;
+  sync_status?: string;
+};
+
+export type DecisionInsight = {
+  problem: string;
+  impact: string;
+  recommended_action: string;
+  priority: "low" | "medium" | "high";
+};
+
 export type Workflow = {
   id: number;
-  workflow_id: string;
+  item_name: string;
+  product_name?: string | null;
+  route_name?: string | null;
   shipment_id: string;
   title: string;
   description: string;
@@ -82,20 +111,35 @@ export type Workflow = {
   final_outcome?: string | null;
   created_at: string;
   updated_at: string;
+  supplier_status?: string;
+  route_status?: string;
+  inventory_status?: string;
+  /** Denormalized checklist flags; one row per shipment. */
+  executive_completed?: boolean;
+  supplier_completed?: boolean;
+  operations_completed?: boolean;
+  inventory_completed?: boolean;
+  material_type?: string;
+  quantity?: number | null;
+  unit?: string;
+  supplier_party_name?: string;
+  supplier_party_location?: string;
+  sync_version?: number;
+  timeline?: TimelineEntryWire[];
 };
 
 export type NotificationItem = {
   id: number;
   message: string;
   type: "info" | "warning" | "critical" | "success";
-  related_workflow_id: string;
+  related_item_name: string;
   is_read: boolean;
   created_at: string;
 };
 
 export type WorkflowUpdate = {
   id: number;
-  workflow_id: string;
+  item_name: string;
   stage_name: WorkflowStage;
   role: UserRole;
   previous_status: WorkflowStatus;
@@ -126,7 +170,7 @@ export type WorkflowShipmentDetails = {
 export type AuditLogItem = {
   id: number;
   user_id: number;
-  workflow_id?: string | null;
+  item_name?: string | null;
   action_type: string;
   module_name: string;
   details: string;
@@ -138,7 +182,7 @@ export type AuditTrailItem = {
   user_id: number;
   user_name: string | null;
   user_role: UserRole | null;
-  workflow_id: string | null;
+  item_name: string | null;
   previous_status: string | null;
   new_status: string | null;
   action_type: string;
@@ -150,7 +194,7 @@ export type AuditTrailItem = {
 
 export type AuditTrailQuery = {
   role?: UserRole;
-  workflow_id?: string;
+  item_name?: string;
   start?: string; // ISO
   end?: string; // ISO
   action_type?: string;
@@ -229,6 +273,8 @@ export type RouteRecommendationItem = {
   score: number;
   explanation: string;
   path_coordinates: Array<{ lat: number; lng: number }>;
+  /** balanced | fast | eco when backend attached real road API */
+  route_lane?: string | null;
 };
 
 export type RouteRecommendationResponse = {
@@ -247,6 +293,7 @@ export type LiveTrackingResponse = {
 };
 
 export type WorkflowTaskItem = {
+  id: number;
   task_key: string;
   stage: WorkflowStage;
   task_name: string;
@@ -258,10 +305,39 @@ export type WorkflowTaskItem = {
   can_edit: boolean;
 };
 
-export type WorkflowTasksResponse = {
+export type ChecklistPatchResponse = {
+  success: boolean;
   workflow_id: string;
+  item_name: string;
+  updated_role: string;
+  field: string;
+  completed: boolean;
+  next_team: string;
+  sync_version: number;
+};
+
+export type CreateRawMaterialBody = {
+  item_name: string;
+  material_type: string;
+  quantity: number;
+  unit: string;
+  supplier_name: string;
+  supplier_location: string;
+  source_location: string;
+  destination_location: string;
+  required_date?: string | null;
+  priority: "low" | "medium" | "high";
+  remarks?: string;
+  shipment_id?: string;
+};
+
+export type WorkflowTasksResponse = {
+  item_name: string;
+  /** Internal DB id — use with task id for stable checkbox keys. */
+  workflow_id: number;
   current_stage: WorkflowStage;
   current_role: UserRole;
+  sync_version: number;
   tasks: WorkflowTaskItem[];
 };
 
@@ -270,20 +346,72 @@ export const api = {
   me: (token: string) => request<AuthUser>("/auth/me", "GET", token),
   logout: (token: string) => request<{ message: string }>("/auth/logout", "POST", token),
   dashboardSummaryByRole: (token: string, role: UserRole) => request<DashboardSummaryResponse>(`/dashboards/${role}/summary`, "GET", token),
-  workflows: (token: string) => request<Workflow[]>("/workflows", "GET", token),
+  workflows: (token: string, opts?: { q?: string }) => {
+    const qs = opts?.q?.trim() ? `?q=${encodeURIComponent(opts.q.trim())}` : "";
+    return request<Workflow[]>(`/workflows${qs}`, "GET", token);
+  },
+  createWorkflow: (token: string, body: CreateRawMaterialBody) =>
+    request<Workflow>("/workflows", "POST", token, {
+      item_name: body.item_name,
+      material_type: body.material_type,
+      quantity: body.quantity,
+      unit: body.unit,
+      supplier_name: body.supplier_name,
+      supplier_location: body.supplier_location,
+      source_location: body.source_location,
+      destination_location: body.destination_location,
+      priority: body.priority,
+      remarks: body.remarks ?? "",
+      remark: body.remarks ?? "",
+      shipment_id: body.shipment_id ?? "",
+      required_date: body.required_date || null,
+    }),
+  patchWorkflowChecklist: (
+    token: string,
+    workflowRef: string,
+    body: { role: string; field: string; completed: boolean; remarks?: string; expected_sync_version?: number | null }
+  ) =>
+    request<ChecklistPatchResponse>(`/workflows/${encodeURIComponent(workflowRef)}/checklist`, "PATCH", token, {
+      role: body.role,
+      field: body.field,
+      completed: body.completed,
+      remarks: body.remarks ?? "",
+      expected_sync_version: body.expected_sync_version ?? null,
+    }),
   pendingTasks: (token: string) => request<Workflow[]>("/workflows/pending", "GET", token),
-  workflowById: (token: string, workflowId: string) => request<Workflow>(`/workflows/${workflowId}`, "GET", token),
-  workflowTimeline: (token: string, workflowId: string) => request<WorkflowUpdate[]>(`/workflows/${workflowId}/timeline`, "GET", token),
-  workflowShipmentDetails: (token: string, workflowId: string) => request<WorkflowShipmentDetails>(`/workflows/${workflowId}/shipment`, "GET", token),
-  workflowAudit: (token: string, workflowId: string) => request<AuditLogItem[]>(`/workflows/${workflowId}/audit`, "GET", token),
-  workflowTasks: (token: string, workflowId: string) => request<WorkflowTasksResponse>(`/workflows/${workflowId}/tasks`, "GET", token),
-  updateWorkflowTask: (token: string, workflowId: string, taskKey: string, completed: boolean) =>
-    request<WorkflowTaskItem>(`/workflows/${workflowId}/tasks/${encodeURIComponent(taskKey)}`, "PATCH", token, { completed }),
-  addWorkflowRemark: (token: string, workflowId: string, remark: string) => request(`/workflows/${workflowId}/remark`, "POST", token, { remark }),
-  updateWorkflowStatus: (token: string, workflowId: string, status: WorkflowStatus, remark: string) =>
-    request<Workflow>(`/workflows/${workflowId}/status`, "PATCH", token, { status, remark }),
-  completeWorkflowStage: (token: string, workflowId: string, remark: string) =>
-    request<Workflow>(`/workflows/${workflowId}/complete`, "POST", token, { remark }),
+  workflowByItemName: (token: string, itemName: string) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}`, "GET", token),
+  workflowTimeline: (token: string, itemName: string) =>
+    request<WorkflowUpdate[]>(`/workflows/${encodeURIComponent(itemName)}/timeline`, "GET", token),
+  workflowShipmentDetails: (token: string, itemName: string) =>
+    request<WorkflowShipmentDetails>(`/workflows/${encodeURIComponent(itemName)}/shipment`, "GET", token),
+  workflowAudit: (token: string, itemName: string) =>
+    request<AuditLogItem[]>(`/workflows/${encodeURIComponent(itemName)}/audit`, "GET", token),
+  workflowTasks: (token: string, itemName: string) =>
+    request<WorkflowTasksResponse>(`/workflows/${encodeURIComponent(itemName)}/tasks`, "GET", token),
+  updateWorkflowTask: (token: string, itemName: string, taskKey: string, completed: boolean, remarks?: string) =>
+    request<WorkflowTaskItem>(
+      `/workflows/${encodeURIComponent(itemName)}/tasks/${encodeURIComponent(taskKey)}`,
+      "PATCH",
+      token,
+      { completed, remarks: remarks ?? "" }
+    ),
+  patchWorkflowStageStatus: (
+    token: string,
+    workflowRef: string,
+    body: { stage: string; completed: boolean; remarks?: string }
+  ) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(workflowRef)}/stage-status`, "PATCH", token, {
+      stage: body.stage,
+      completed: body.completed,
+      remarks: body.remarks ?? "",
+    }),
+  addWorkflowRemark: (token: string, itemName: string, remark: string) =>
+    request(`/workflows/${encodeURIComponent(itemName)}/remark`, "POST", token, { remark }),
+  updateWorkflowStatus: (token: string, itemName: string, status: WorkflowStatus, remark: string) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}/status`, "PATCH", token, { status, remark }),
+  completeWorkflowStage: (token: string, itemName: string, remark: string) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}/complete`, "POST", token, { remark }),
   notifications: (token: string) => request<NotificationItem[]>("/notifications", "GET", token),
   unreadNotificationCount: (token: string) => request<{ unread: number }>("/notifications/unread-count", "GET", token),
   markAllNotificationsRead: (token: string) => request<{ updated: number }>("/notifications/read-all", "POST", token),
@@ -291,7 +419,7 @@ export const api = {
   auditTrail: (token: string, query?: AuditTrailQuery) => {
     const qs = new URLSearchParams();
     if (query?.role) qs.set("role", query.role);
-    if (query?.workflow_id) qs.set("workflow_id", query.workflow_id);
+    if (query?.item_name) qs.set("item_name", query.item_name);
     if (query?.start) qs.set("start", query.start);
     if (query?.end) qs.set("end", query.end);
     if (query?.action_type) qs.set("action_type", query.action_type);
@@ -302,6 +430,18 @@ export const api = {
     return request<AuditTrailItem[]>(`/audit-trail${suffix}`, "GET", token);
   },
   forecast: (token: string) => request("/forecast", "GET", token),
+  decision: (token: string, itemName?: string) => {
+    const q = itemName ? `?item_name=${encodeURIComponent(itemName)}` : "";
+    return request<DecisionInsight>(`/decision${q}`, "GET", token);
+  },
+  workflowControlTimeline: (token: string, itemName: string) =>
+    request<TimelineEntryWire[]>(`/workflows/${encodeURIComponent(itemName)}/control-timeline`, "GET", token),
+  patchRouteDomain: (token: string, itemName: string, body: { route_status: string; remark?: string }) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}/control/route`, "PATCH", token, body),
+  patchSupplierDomain: (token: string, itemName: string, body: { supplier_status: string; delay_reason?: string }) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}/control/supplier`, "PATCH", token, body),
+  patchInventoryDomain: (token: string, itemName: string, body: { inventory_status: string; reorder_requested?: boolean; remark?: string }) =>
+    request<Workflow>(`/workflows/${encodeURIComponent(itemName)}/control/inventory`, "PATCH", token, body),
   inventoryInsights: (token: string) => request("/inventory-insights", "GET", token),
   supplierRisk: (token: string) => request("/supplier-risk", "GET", token),
   scenario: (token: string, scenario: string) => request("/scenario-simulation", "POST", token, { scenario }),
@@ -309,10 +449,20 @@ export const api = {
     request<RouteRecommendationResponse>("/route-recommendations", "POST", token, { source, destination }),
   recommendRoute: (token: string, payload: RouteRecommendationRequest) =>
     request<RouteRecommendationResponse>("/route-recommendations", "POST", token, payload),
-  selectRouteForWorkflow: (token: string, workflowId: string, routeCode: string) =>
-    request<{ workflow_id: string; shipment_id: string; selected_route_code: string }>(`/workflows/${workflowId}/routes/select`, "POST", token, { route_code: routeCode }),
-  rerouteForWorkflow: (token: string, workflowId: string) =>
-    request<RouteRecommendationResponse>(`/workflows/${workflowId}/routes/reroute`, "POST", token, { disruption_event: "map_reroute", force: true }),
+  selectRouteForWorkflow: (token: string, itemName: string, routeCode: string) =>
+    request<{ item_name: string; shipment_id: string; selected_route_code: string }>(
+      `/workflows/${encodeURIComponent(itemName)}/routes/select`,
+      "POST",
+      token,
+      { route_code: routeCode }
+    ),
+  rerouteForWorkflow: (token: string, itemName: string) =>
+    request<RouteRecommendationResponse>(
+      `/workflows/${encodeURIComponent(itemName)}/routes/reroute`,
+      "POST",
+      token,
+      { disruption_event: "map_reroute", force: true }
+    ),
   liveTracking: (token: string, shipmentId: string) => request<LiveTrackingResponse>(`/shipments/live-tracking/${shipmentId}`, "GET", token),
   indiaCitiesReference: (token: string) => request<IndiaCityWire[]>("/reference/india-cities", "GET", token),
 };

@@ -13,53 +13,37 @@ export function Sidebar() {
   return (
     <aside className="hidden w-64 flex-col border-r border-slate-800 bg-slate-950/80 p-4 lg:flex">
       <div className="mb-8 px-2">
-        <p className="font-display text-lg font-semibold text-white">SmartFlow AI</p>
-        <p className="text-xs text-slate-500">Supply Chain App</p>
+        <p className="font-display text-lg font-semibold text-white">Control Tower</p>
+        <p className="text-xs text-slate-500">Supply chain at a glance</p>
       </div>
       <nav className="flex flex-1 flex-col gap-1">
-        {(role === "executive" || role === "operations") && (
-          <NavLink to="/dashboard/operations" className={linkClass}>
-            <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden />
-            Operations
-          </NavLink>
-        )}
-        {(role === "executive" || role === "inventory") && (
-          <NavLink to="/dashboard/inventory" className={linkClass}>
-            <span className="h-2 w-2 rounded-full bg-violet-400" aria-hidden />
-            Inventory
-          </NavLink>
-        )}
-        {(role === "executive" || role === "supplier_risk") && (
-          <NavLink to="/dashboard/supplier-risk" className={linkClass}>
-            <span className="h-2 w-2 rounded-full bg-rose-400" aria-hidden />
-            Supplier Risk
-          </NavLink>
-        )}
         {role === "executive" && (
           <NavLink to="/dashboard/executive" className={linkClass}>
             <span className="h-2 w-2 rounded-full bg-sky-400" aria-hidden />
             Executive
           </NavLink>
         )}
-        <NavLink to="/workflows" className={linkClass}>
-          <span className="h-2 w-2 rounded-full bg-cyan-300" aria-hidden />
-          Work
-        </NavLink>
-        <NavLink to="/notifications" className={linkClass}>
-          <span className="h-2 w-2 rounded-full bg-amber-300" aria-hidden />
-          Alerts
-        </NavLink>
-        <NavLink to="/audit-trail" className={linkClass}>
-          <span className="h-2 w-2 rounded-full bg-orange-400" aria-hidden />
-          History
-        </NavLink>
-        <NavLink to="/map" className={linkClass}>
-          <span className="h-2 w-2 rounded-full bg-blue-300" aria-hidden />
-          Map
-        </NavLink>
+        {role === "operations" && (
+          <NavLink to="/dashboard/operations" className={linkClass}>
+            <span className="h-2 w-2 rounded-full bg-emerald-400" aria-hidden />
+            Operations
+          </NavLink>
+        )}
+        {role === "inventory" && (
+          <NavLink to="/dashboard/inventory" className={linkClass}>
+            <span className="h-2 w-2 rounded-full bg-violet-400" aria-hidden />
+            Inventory
+          </NavLink>
+        )}
+        {role === "supplier_risk" && (
+          <NavLink to="/dashboard/supplier-risk" className={linkClass}>
+            <span className="h-2 w-2 rounded-full bg-rose-400" aria-hidden />
+            Supplier
+          </NavLink>
+        )}
       </nav>
       <div className="mt-auto rounded-xl border border-slate-800 bg-slate-900/50 p-3 text-xs text-slate-500">
-        Tools: demand, stock, supplier risk, what-if.
+        Your team edits its own step in the work status list. Everyone sees the same updates.
       </div>
     </aside>
   );

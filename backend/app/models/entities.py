@@ -26,7 +26,18 @@ class WorkflowModel(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     workflow_id: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    item_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    route_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     shipment_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    material_type: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    unit: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    supplier_party_name: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    supplier_party_location: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    sync_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # True only for POST /workflows (exec raw material form); demo seeds use False.
+    user_entered: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     priority: Mapped[str] = mapped_column(String(20), default="Medium", index=True, nullable=False)
@@ -43,6 +54,15 @@ class WorkflowModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     final_outcome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    supplier_status: Mapped[str] = mapped_column(String(64), default="scheduled", nullable=False)
+    route_status: Mapped[str] = mapped_column(String(64), default="not_dispatched", nullable=False)
+    inventory_status: Mapped[str] = mapped_column(String(64), default="ok", nullable=False)
+    timeline_events: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Denormalized lane flags (one workflow row = one shipment; kept in sync with checklist tasks).
+    executive_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supplier_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    operations_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    inventory_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     assigned_user: Mapped[UserModel | None] = relationship("UserModel", foreign_keys=[assigned_user_id])
     tasks: Mapped[list["WorkflowTaskModel"]] = relationship(

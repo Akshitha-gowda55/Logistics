@@ -11,7 +11,7 @@ export function emitWorkflowSync(): void {
  * Cross-dashboard sync: refetch when another tab/dashboard updates a workflow,
  * and on a timer so counts/cards stay aligned without WebSockets.
  */
-export function useWorkflowSyncRefresh(callback: () => void | Promise<void>, deps: unknown[], intervalMs = 20000): void {
+export function useWorkflowSyncRefresh(callback: () => void | Promise<void>, deps: unknown[], intervalMs = 4500): void {
   useEffect(() => {
     const run = () => {
       void callback();
@@ -19,9 +19,14 @@ export function useWorkflowSyncRefresh(callback: () => void | Promise<void>, dep
     const onSync = () => run();
     window.addEventListener(WORKFLOW_SYNC_EVENT, onSync);
     const intervalId = window.setInterval(run, intervalMs);
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") run();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       window.removeEventListener(WORKFLOW_SYNC_EVENT, onSync);
       window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.data.india_locations import resolve_india_city
 from app.models.entities import RouteModel, RouteReliabilityModel, ShipmentModel, WorkflowModel
 from app.services.india_synthetic_routes import build_synthetic_routes, merge_db_and_synthetic
+from app.services.road_routing import triple_road_profiles
 from app.services.routing_geometry import densify_sparse_polyline
 
 
@@ -339,6 +340,33 @@ def recommend_routes(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No route candidates could be built for this origin–destination pair.",
         )
+
+    # Real road geometries (Best / Fast / Eco): OpenRouteService → GraphHopper → Mapbox → curved demo.
+    try:
+        road_profiles = triple_road_profiles(float(origin.lat), float(origin.lon), float(dest.lat), float(dest.lon))
+        lane_specs = (
+            ("recommended", "balanced", "Best route suggestion"),
+            ("fastest", "fast", "Fast route suggestion"),
+            ("shortest", "eco", "Eco route (shortest distance)"),
+        )
+        for i, (ors_key, lane_slug, lane_label) in enumerate(lane_specs):
+            if i >= len(scored):
+                break
+            coords, geo_km, geo_hrs = road_profiles[ors_key]
+            scored[i]["path_coordinates"] = densify_sparse_polyline(coords, variant=i + 7, min_points=24)
+            old_km = float(scored[i]["distance_km"])
+            old_eta = float(scored[i]["eta_hours"])
+            if geo_km:
+                scored[i]["distance_km"] = float(geo_km)
+                if geo_hrs is None:
+                    scored[i]["eta_hours"] = round(old_eta * ((float(geo_km) / max(1e-6, old_km)) ** 0.9), 2)
+            if geo_hrs is not None:
+                scored[i]["eta_hours"] = float(geo_hrs)
+            scored[i]["route_lane"] = lane_slug
+            scored[i]["explanation"] = f"{lane_label}. {scored[i]['explanation']}"
+    except Exception:
+        pass
+
     best = scored[0]
     alternates = scored[1:4]
 
@@ -370,9 +398,14 @@ def recommend_routes(
     }
 
 
-def select_route_for_workflow(db: Session, workflow_id: str, route_code: str) -> dict:
-    wf = db.scalar(select(WorkflowModel).where(WorkflowModel.workflow_id == workflow_id))
+def select_route_for_workflow(db: Session, workflow_ref: str, route_code: str) -> dict:
+    ref = (workflow_ref or "").strip()
+    wf = db.scalar(select(WorkflowModel).where(WorkflowModel.item_name == ref))
+    if wf is None:
+        wf = db.scalar(select(WorkflowModel).where(WorkflowModel.workflow_id == ref))
     if not wf:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
+    if not wf.user_entered:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
     shipment = db.scalar(select(ShipmentModel).where(ShipmentModel.workflow_id == wf.id))
     if not shipment:
@@ -385,5 +418,5 @@ def select_route_for_workflow(db: Session, workflow_id: str, route_code: str) ->
     shipment.updated_at = datetime.now(UTC)
     db.commit()
     db.refresh(shipment)
-    return {"workflow_id": workflow_id, "shipment_id": shipment.shipment_id, "selected_route_code": route.route_code}
+    return {"item_name": wf.item_name, "shipment_id": shipment.shipment_id, "selected_route_code": route.route_code}
 

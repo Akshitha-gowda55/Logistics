@@ -17,9 +17,19 @@ export function LoginPage() {
     setError("");
     setWorking(true);
     try {
-      await login(email, password);
-    } catch {
-      setError("Invalid credentials. Use demo users with password demo1234");
+      await login(email.trim(), password);
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const lower = raw.toLowerCase();
+      if (lower.includes("failed to fetch") || lower.includes("networkerror") || lower.includes("load failed")) {
+        setError("Cannot reach the API. Start the backend (port 8000) and keep the Vite dev server proxy to /api.");
+      } else if (raw.includes("401") || lower.includes("invalid credentials")) {
+        setError(
+          "Invalid email or password. Demo accounts (password demo1234): executive@smartflow.ai, operations@smartflow.ai, inventory@smartflow.ai, supplier@smartflow.ai — restart the API once so demo users sync.",
+        );
+      } else {
+        setError(raw || "Sign-in failed.");
+      }
     } finally {
       setWorking(false);
     }
@@ -38,7 +48,11 @@ export function LoginPage() {
         <button type="submit" disabled={working} className="mt-5 w-full rounded-lg bg-blue-600 px-3 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-60">
           {working ? "Signing in..." : "Sign in"}
         </button>
-        <p className="mt-4 text-xs text-slate-500">Users: executive@smartflow.ai, operations@smartflow.ai, inventory@smartflow.ai, supplier@smartflow.ai</p>
+        <p className="mt-4 text-xs text-slate-500">
+          Password for all: <span className="font-mono text-slate-400">demo1234</span>
+          <br />
+          Emails: executive@, operations@, inventory@, supplier@ — all <span className="font-mono">smartflow.ai</span>
+        </p>
       </form>
     </div>
   );

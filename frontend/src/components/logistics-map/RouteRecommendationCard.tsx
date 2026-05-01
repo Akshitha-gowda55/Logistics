@@ -16,15 +16,22 @@ function riskPill(label: string) {
   return "bg-emerald-900/55 ring-emerald-500/55 text-emerald-100";
 }
 
+function laneBadgeText(route: RouteRecommendationItem): string {
+  if (route.route_lane === "fast") return "Fast route";
+  if (route.route_lane === "eco") return "Eco route";
+  return "Best route";
+}
+
 export function RouteRecommendationCard({
   route,
   badge,
   onSelect,
 }: {
   route: RouteRecommendationItem;
-  badge: "Best" | "Alternate";
+  badge?: "Best" | "Alternate";
   onSelect?: () => void;
 }) {
+  const ribbon = badge === "Alternate" ? "Other route" : laneBadgeText(route);
   return (
     <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -36,7 +43,7 @@ export function RouteRecommendationCard({
             Carrier: <span className="font-semibold text-slate-200">{route.carrier_suggestion}</span>
           </p>
         </div>
-        <span className="rounded-full bg-sky-600 px-3 py-1 text-[0.65rem] font-semibold text-white">{badge}</span>
+        <span className="rounded-full bg-sky-600 px-3 py-1 text-[0.65rem] font-semibold text-white">{ribbon}</span>
       </div>
 
       <div className="mt-3 grid gap-2 sm:grid-cols-3 text-xs">
